@@ -88,7 +88,7 @@ async function loadRecommendation() {
   try {
     const result = await api('/api/next-request');
     recommendation = result.request;
-    $('next-status').textContent = recommendation ? recommendation.title : 'All caught up.';
+    $('next-status').textContent = recommendation ? recommendation.title : 'Nothing to handle right now.'; // the reason says whether the queue is empty or snoozed
     // Usability: show who and where, so the operator can act without hunting through the inbox.
     if (recommendation) $('next-meta').textContent = `${recommendation.guest} · Room ${recommendation.room} · ${recommendation.urgency}`;
     $('next-reason').textContent = result.reason;

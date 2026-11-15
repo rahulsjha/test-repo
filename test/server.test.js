@@ -103,3 +103,66 @@ test('unknown urgency and unreadable dates sort last instead of crashing', async
   assert.match(order[1][1], /creation time unknown/);
   assert.match(order[2][1], /Unrecognised urgency/);
 });
+
+// Step 3: snoozedUntil. The clock is fixed so results do not depend on when the tests run.
+const NOW = Date.parse('2026-11-03T09:00:00Z');
+const snoozedFixture = (t, requests) => fixture(t, { requests, now: () => NOW });
+const snooze = (id, urgency, createdAt, snoozedUntil, status = 'open') => ({ ...record(id, urgency, createdAt, status), ...(snoozedUntil !== undefined && { snoozedUntil }) });
+
+test('a valid future snooze hides the request; the next one by the usual order is chosen', async t => {
+  const call = await snoozedFixture(t, [
+    snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', '2026-11-03T10:00:00Z'),        // future: hidden
+    snooze('GD-2', 'urgent', '2026-11-03T08:30:00Z', '2026-11-03T14:30:00+05:30'),   // = 09:00 UTC, not later than now: shown
+    snooze('GD-3', 'urgent', '2026-11-03T08:30:00Z'),
+  ]);
+  const result = await next(call);
+  assert.equal(result.request.id, 'GD-2'); // GD-2 beats GD-3 on ID; GD-1 is skipped
+  assert.match(result.reason, /1 snoozed request hidden for now\./);
+});
+
+test('expired, missing and invalid snooze values do not hide a request', async t => {
+  const values = {
+    expired: '2026-11-03T08:59:59Z', missing: undefined, empty: '', text: 'tomorrow', nullValue: null,
+    number: 1893456000000, numericString: '12345', impossibleDate: '2026-11-31T10:00:00Z', badMonth: '2026-13-01T10:00:00Z',
+    noTimezone: '2026-11-04T10:00:00', dateOnly: '2026-11-04', notIso: 'Nov 4 2026', badHour: '2026-11-03T25:00:00Z',
+  };
+  for (const [label, value] of Object.entries(values)) {
+    const call = await snoozedFixture(t, [snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', value), snooze('GD-2', 'low', '2026-11-03T07:00:00Z')]);
+    const result = await next(call);
+    assert.equal(result.request.id, 'GD-1', `${label} (${JSON.stringify(value)}) should not hide GD-1`);
+    assert.doesNotMatch(result.reason, /snoozed/, label);
+  }
+});
+
+test('snooze does not change ordering or the resolved rule', async t => {
+  const call = await snoozedFixture(t, [
+    snooze('GD-1', 'urgent', '2026-11-03T07:00:00Z', '2026-11-03T08:00:00Z', 'resolved'), // expired snooze, still resolved
+    snooze('GD-2', 'normal', '2026-11-03T08:20:00Z', '2026-11-03T08:00:00Z'),             // expired
+    snooze('GD-3', 'normal', '2026-11-03T08:10:00Z', 'not-a-date'),                      // invalid
+    snooze('GD-4', 'urgent', '2026-11-03T08:00:00Z', '2026-11-04T00:00:00.123456Z'),     // future, microseconds
+    snooze('GD-5', 'low', '2026-11-03T06:00:00Z'),
+  ]);
+  const seen = [];
+  for (let result = await next(call), guard = 0; result.request && guard < 10; result = await next(call), guard++) {
+    seen.push(result.request.id);
+    await call(`/api/requests/${result.request.id}`, { method: 'PATCH', body: '{"status":"resolved"}' });
+  }
+  assert.deepEqual(seen, ['GD-3', 'GD-2', 'GD-5']);
+});
+
+test('when every open request is snoozed, request is null and the reason says when one returns', async t => {
+  const call = await snoozedFixture(t, [
+    snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', '2026-11-03T11:00:00Z'),
+    snooze('GD-2', 'low', '2026-11-03T08:00:00Z', '2026-11-03T10:15:00+00:00'),
+    snooze('GD-3', 'low', '2026-11-03T08:00:00Z', '2026-11-03T08:00:00Z', 'resolved'),
+  ]);
+  assert.deepEqual(await next(call), { request: null, reason: 'No requests to handle right now. 2 open requests are snoozed; the earliest returns at 2026-11-03 10:15 UTC.' });
+});
+
+test('a snooze expires on the next read without any scheduler', async t => {
+  let clock = NOW;
+  const call = await fixture(t, { requests: [snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', '2026-11-03T09:30:00Z')], now: () => clock });
+  assert.equal((await next(call)).request, null);
+  clock = Date.parse('2026-11-03T09:30:00Z'); // equal: no longer later than now
+  assert.equal((await next(call)).request.id, 'GD-1');
+});

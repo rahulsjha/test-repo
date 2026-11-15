@@ -1,0 +1,137 @@
+diff --git a/public/app.js b/public/app.js
+index f86ad39..85df7ad 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -88,7 +88,7 @@ async function loadRecommendation() {
+   try {
+     const result = await api('/api/next-request');
+     recommendation = result.request;
+-    $('next-status').textContent = recommendation ? recommendation.title : 'All caught up.';
++    $('next-status').textContent = recommendation ? recommendation.title : 'Nothing to handle right now.'; // the reason says whether the queue is empty or snoozed
+     // Usability: show who and where, so the operator can act without hunting through the inbox.
+     if (recommendation) $('next-meta').textContent = `${recommendation.guest} · Room ${recommendation.room} · ${recommendation.urgency}`;
+     $('next-reason').textContent = result.reason;
+diff --git a/server.js b/server.js
+index 094bb65..2bad2df 100644
+--- a/server.js
++++ b/server.js
+@@ -45,9 +45,27 @@ function reasonFor(request) {
+   return `${level}, ${since}. Oldest open request at this urgency.`;
+ }
+ 
++// snoozedUntil must be a full ISO 8601 timestamp with a timezone (Z or ±hh:mm) and a real
++// calendar date. Date.parse alone is too lenient: it rolls 2026-02-31 into March, reads
++// 12345 as the year 12345, and reads zone-less times in the server's local timezone.
++const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
++export function snoozeEnd(value) {
++  const match = typeof value === 'string' && ISO_TIMESTAMP.exec(value);
++  if (!match) return null;
++  const [year, month, day] = match.slice(1, 4).map(Number);
++  const date = new Date(Date.UTC(year, month - 1, day));
++  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
++  const time = Date.parse(value);
++  return Number.isNaN(time) ? null : time;
++}
++// Only a valid, still-future snooze hides a request. Missing, invalid or expired values do not.
++const isSnoozed = (item, now) => { const end = snoozeEnd(item.snoozedUntil); return end !== null && end > now; };
++const utcTime = time => `${new Date(time).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
++
+ // A new server starts with independent fictional records. A browser reload keeps changes;
+ // restarting the process resets them. The exercise does not need a database or credentials.
+-export function createStarterServer({ requests = seed } = {}) {
++// `now` is injectable so tests can fix the clock; snoozes are checked on every read, so no scheduler is needed.
++export function createStarterServer({ requests = seed, now = Date.now } = {}) {
+   const records = structuredClone(requests);
+   return createServer(async (req, res) => {
+     res.setHeader('Cache-Control', 'no-store');
+@@ -61,9 +79,17 @@ export function createStarterServer({ requests = seed } = {}) {
+         return res.end(readFileSync(new URL(`./public/${file}`, import.meta.url)));
+       }
+       if (req.method === 'GET' && pathname === '/api/next-request') {
+-        const request = records.filter(item => item.status === 'open')
++        const current = now();
++        const open = records.filter(item => item.status === 'open');
++        const snoozed = open.filter(item => isSnoozed(item, current));
++        const request = open.filter(item => !isSnoozed(item, current))
+           .reduce((best, item) => (!best || compareRequests(item, best) < 0 ? item : best), null);
+-        return json(res, 200, { request, reason: request ? reasonFor(request) : 'No open requests remain.' });
++        const hidden = snoozed.length ? ` ${snoozed.length} snoozed request${snoozed.length === 1 ? '' : 's'} hidden for now.` : '';
++        const wake = snoozed.length ? utcTime(snoozed.reduce((min, item) => Math.min(min, snoozeEnd(item.snoozedUntil)), Infinity)) : '';
++        const reason = request ? reasonFor(request) + hidden
++          : snoozed.length ? `No requests to handle right now. ${snoozed.length} open request${snoozed.length === 1 ? ' is' : 's are'} snoozed; the earliest returns at ${wake}.`
++          : 'No open requests remain.';
++        return json(res, 200, { request, reason });
+       }
+       if (req.method === 'GET' && pathname === '/api/requests') {
+         return json(res, 200, { requests: records.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)) });
+diff --git a/test/server.test.js b/test/server.test.js
+index ec1b198..4dab51d 100644
+--- a/test/server.test.js
++++ b/test/server.test.js
+@@ -103,3 +103,66 @@ test('unknown urgency and unreadable dates sort last instead of crashing', async
+   assert.match(order[1][1], /creation time unknown/);
+   assert.match(order[2][1], /Unrecognised urgency/);
+ });
++
++// Step 3: snoozedUntil. The clock is fixed so results do not depend on when the tests run.
++const NOW = Date.parse('2026-11-03T09:00:00Z');
++const snoozedFixture = (t, requests) => fixture(t, { requests, now: () => NOW });
++const snooze = (id, urgency, createdAt, snoozedUntil, status = 'open') => ({ ...record(id, urgency, createdAt, status), ...(snoozedUntil !== undefined && { snoozedUntil }) });
++
++test('a valid future snooze hides the request; the next one by the usual order is chosen', async t => {
++  const call = await snoozedFixture(t, [
++    snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', '2026-11-03T10:00:00Z'),        // future: hidden
++    snooze('GD-2', 'urgent', '2026-11-03T08:30:00Z', '2026-11-03T14:30:00+05:30'),   // = 09:00 UTC, not later than now: shown
++    snooze('GD-3', 'urgent', '2026-11-03T08:30:00Z'),
++  ]);
++  const result = await next(call);
++  assert.equal(result.request.id, 'GD-2'); // GD-2 beats GD-3 on ID; GD-1 is skipped
++  assert.match(result.reason, /1 snoozed request hidden for now\./);
++});
++
++test('expired, missing and invalid snooze values do not hide a request', async t => {
++  const values = {
++    expired: '2026-11-03T08:59:59Z', missing: undefined, empty: '', text: 'tomorrow', nullValue: null,
++    number: 1893456000000, numericString: '12345', impossibleDate: '2026-11-31T10:00:00Z', badMonth: '2026-13-01T10:00:00Z',
++    noTimezone: '2026-11-04T10:00:00', dateOnly: '2026-11-04', notIso: 'Nov 4 2026', badHour: '2026-11-03T25:00:00Z',
++  };
++  for (const [label, value] of Object.entries(values)) {
++    const call = await snoozedFixture(t, [snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', value), snooze('GD-2', 'low', '2026-11-03T07:00:00Z')]);
++    const result = await next(call);
++    assert.equal(result.request.id, 'GD-1', `${label} (${JSON.stringify(value)}) should not hide GD-1`);
++    assert.doesNotMatch(result.reason, /snoozed/, label);
++  }
++});
++
++test('snooze does not change ordering or the resolved rule', async t => {
++  const call = await snoozedFixture(t, [
++    snooze('GD-1', 'urgent', '2026-11-03T07:00:00Z', '2026-11-03T08:00:00Z', 'resolved'), // expired snooze, still resolved
++    snooze('GD-2', 'normal', '2026-11-03T08:20:00Z', '2026-11-03T08:00:00Z'),             // expired
++    snooze('GD-3', 'normal', '2026-11-03T08:10:00Z', 'not-a-date'),                      // invalid
++    snooze('GD-4', 'urgent', '2026-11-03T08:00:00Z', '2026-11-04T00:00:00.123456Z'),     // future, microseconds
++    snooze('GD-5', 'low', '2026-11-03T06:00:00Z'),
++  ]);
++  const seen = [];
++  for (let result = await next(call), guard = 0; result.request && guard < 10; result = await next(call), guard++) {
++    seen.push(result.request.id);
++    await call(`/api/requests/${result.request.id}`, { method: 'PATCH', body: '{"status":"resolved"}' });
++  }
++  assert.deepEqual(seen, ['GD-3', 'GD-2', 'GD-5']);
++});
++
++test('when every open request is snoozed, request is null and the reason says when one returns', async t => {
++  const call = await snoozedFixture(t, [
++    snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', '2026-11-03T11:00:00Z'),
++    snooze('GD-2', 'low', '2026-11-03T08:00:00Z', '2026-11-03T10:15:00+00:00'),
++    snooze('GD-3', 'low', '2026-11-03T08:00:00Z', '2026-11-03T08:00:00Z', 'resolved'),
++  ]);
++  assert.deepEqual(await next(call), { request: null, reason: 'No requests to handle right now. 2 open requests are snoozed; the earliest returns at 2026-11-03 10:15 UTC.' });
++});
++
++test('a snooze expires on the next read without any scheduler', async t => {
++  let clock = NOW;
++  const call = await fixture(t, { requests: [snooze('GD-1', 'urgent', '2026-11-03T08:00:00Z', '2026-11-03T09:30:00Z')], now: () => clock });
++  assert.equal((await next(call)).request, null);
++  clock = Date.parse('2026-11-03T09:30:00Z'); // equal: no longer later than now
++  assert.equal((await next(call)).request.id, 'GD-1');
++});

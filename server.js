@@ -45,9 +45,27 @@ function reasonFor(request) {
   return `${level}, ${since}. Oldest open request at this urgency.`;
 }
 
+// snoozedUntil must be a full ISO 8601 timestamp with a timezone (Z or ±hh:mm) and a real
+// calendar date. Date.parse alone is too lenient: it rolls 2026-02-31 into March, reads
+// 12345 as the year 12345, and reads zone-less times in the server's local timezone.
+const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+export function snoozeEnd(value) {
+  const match = typeof value === 'string' && ISO_TIMESTAMP.exec(value);
+  if (!match) return null;
+  const [year, month, day] = match.slice(1, 4).map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  const time = Date.parse(value);
+  return Number.isNaN(time) ? null : time;
+}
+// Only a valid, still-future snooze hides a request. Missing, invalid or expired values do not.
+const isSnoozed = (item, now) => { const end = snoozeEnd(item.snoozedUntil); return end !== null && end > now; };
+const utcTime = time => `${new Date(time).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+
 // A new server starts with independent fictional records. A browser reload keeps changes;
 // restarting the process resets them. The exercise does not need a database or credentials.
-export function createStarterServer({ requests = seed } = {}) {
+// `now` is injectable so tests can fix the clock; snoozes are checked on every read, so no scheduler is needed.
+export function createStarterServer({ requests = seed, now = Date.now } = {}) {
   const records = structuredClone(requests);
   return createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -61,9 +79,17 @@ export function createStarterServer({ requests = seed } = {}) {
         return res.end(readFileSync(new URL(`./public/${file}`, import.meta.url)));
       }
       if (req.method === 'GET' && pathname === '/api/next-request') {
-        const request = records.filter(item => item.status === 'open')
+        const current = now();
+        const open = records.filter(item => item.status === 'open');
+        const snoozed = open.filter(item => isSnoozed(item, current));
+        const request = open.filter(item => !isSnoozed(item, current))
           .reduce((best, item) => (!best || compareRequests(item, best) < 0 ? item : best), null);
-        return json(res, 200, { request, reason: request ? reasonFor(request) : 'No open requests remain.' });
+        const hidden = snoozed.length ? ` ${snoozed.length} snoozed request${snoozed.length === 1 ? '' : 's'} hidden for now.` : '';
+        const wake = snoozed.length ? utcTime(snoozed.reduce((min, item) => Math.min(min, snoozeEnd(item.snoozedUntil)), Infinity)) : '';
+        const reason = request ? reasonFor(request) + hidden
+          : snoozed.length ? `No requests to handle right now. ${snoozed.length} open request${snoozed.length === 1 ? ' is' : 's are'} snoozed; the earliest returns at ${wake}.`
+          : 'No open requests remain.';
+        return json(res, 200, { request, reason });
       }
       if (req.method === 'GET' && pathname === '/api/requests') {
         return json(res, 200, { requests: records.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)) });
