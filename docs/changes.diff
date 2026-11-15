@@ -1,0 +1,197 @@
+--- a/server.js
++++ b/server.js
+@@ -27,6 +27,24 @@
+   catch { throw Object.assign(new Error('Send a JSON object.'), { status: 400 }); }
+ }
+ 
++// Urgency first (unknown values last), then oldest createdAt (unparseable dates last),
++// then ascending request ID, numeric-aware so GD-99 sorts before GD-100.
++const urgencyRank = { urgent: 0, normal: 1, low: 2 };
++const rankOf = item => urgencyRank[item.urgency] ?? 3;
++const timeOf = item => { const time = Date.parse(item.createdAt); return Number.isNaN(time) ? Infinity : time; };
++const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
++export function compareRequests(a, b) {
++  return order(rankOf(a), rankOf(b)) || order(timeOf(a), timeOf(b))
++    || String(a.id).localeCompare(String(b.id), 'en', { numeric: true });
++}
++
++function reasonFor(request) {
++  const level = urgencyRank[request.urgency] === undefined ? 'Unrecognised urgency (ranked after low)' : `${request.urgency[0].toUpperCase()}${request.urgency.slice(1)} priority`;
++  const time = timeOf(request);
++  const since = time === Infinity ? 'creation time unknown' : `waiting since ${new Date(time).toISOString().slice(11, 16)} UTC`;
++  return `${level}, ${since}. Oldest open request at this urgency.`;
++}
++
+ // A new server starts with independent fictional records. A browser reload keeps changes;
+ // restarting the process resets them. The exercise does not need a database or credentials.
+ export function createStarterServer({ requests = seed } = {}) {
+@@ -43,10 +61,9 @@
+         return res.end(readFileSync(new URL(`./public/${file}`, import.meta.url)));
+       }
+       if (req.method === 'GET' && pathname === '/api/next-request') {
+-        const rank = { urgent: 0, normal: 1, low: 2 };
+-        const request = records.toSorted((a, b) => rank[a.urgency] - rank[b.urgency]
+-          || a.createdAt.localeCompare(b.createdAt) || b.id.localeCompare(a.id))[0] || null;
+-        return json(res, 200, { request, reason: request ? 'Highest urgency, then oldest request.' : 'No open requests remain.' });
++        const request = records.filter(item => item.status === 'open')
++          .reduce((best, item) => (!best || compareRequests(item, best) < 0 ? item : best), null);
++        return json(res, 200, { request, reason: request ? reasonFor(request) : 'No open requests remain.' });
+       }
+       if (req.method === 'GET' && pathname === '/api/requests') {
+         return json(res, 200, { requests: records.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)) });
+--- a/public/app.js
++++ b/public/app.js
+@@ -10,7 +10,8 @@
+ 
+ async function api(path, options = {}) {
+   const response = await fetch(path, { ...options, signal: AbortSignal.timeout(8000), headers: { 'Content-Type': 'application/json', ...options.headers } });
+-  const body = await response.json();
++  // A proxy or crashed server may answer with non-JSON; keep the friendly message instead of a parser error.
++  const body = await response.json().catch(() => ({}));
+   if (!response.ok) throw new Error(body.error || 'The request could not be completed.');
+   return body;
+ }
+@@ -50,20 +51,27 @@
+   if (busy) return;
+   busy = true; $('status').textContent = 'Refreshing your inbox…'; $('error').hidden = true; render();
+   try { records = (await api('/api/requests')).requests; await loadRecommendation(); }
+-  catch (error) { showError(error); }
++  catch (error) { showError(error); recommendationUnavailable(); }
+   finally { busy = false; $('status').textContent = ''; render(); }
+ }
+ 
+ async function update(item) {
+   if (busy) return;
+-  busy = true; $('error').hidden = true; render();
++  // Clear any earlier success text so a failure can never sit next to "Request marked handled."
++  busy = true; $('error').hidden = true; $('status').textContent = ''; render();
++  const done = item.status === 'open' ? 'Request marked handled.' : 'Request reopened.';
++  let saved = false;
+   try {
+     await api(`/api/requests/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: JSON.stringify({ status: item.status === 'open' ? 'resolved' : 'open' }) });
++    saved = true;
+     records = (await api('/api/requests')).requests;
+     await loadRecommendation();
+-    $('status').textContent = item.status === 'open' ? 'Request marked handled.' : 'Request reopened.';
+-  } catch (error) { showError(error); }
+-  finally { busy = false; render(); }
++    $('status').textContent = done;
++  } catch (error) {
++    showError(error);
++    // The save worked but the refresh did not: say both, and do not offer a recommendation that may be stale.
++    if (saved) { $('error').textContent = `${done.slice(0, -1)}, but the inbox could not refresh. Refresh to check the current state.`; recommendationUnavailable(); }
++  } finally { busy = false; render(); }
+ }
+ 
+ for (const button of document.querySelectorAll('[data-filter]')) button.addEventListener('click', () => { filter = button.dataset.filter; render(); });
+@@ -73,6 +81,7 @@
+ async function loadRecommendation() {
+   $('next-status').textContent = 'Finding the next request…';
+   $('next-reason').textContent = '';
++  $('next-meta').textContent = '';
+   $('next-error').hidden = true;
+   $('handle-next').hidden = true;
+   recommendation = null;
+@@ -80,14 +89,24 @@
+     const result = await api('/api/next-request');
+     recommendation = result.request;
+     $('next-status').textContent = recommendation ? recommendation.title : 'All caught up.';
++    // Usability: show who and where, so the operator can act without hunting through the inbox.
++    if (recommendation) $('next-meta').textContent = `${recommendation.guest} · Room ${recommendation.room} · ${recommendation.urgency}`;
+     $('next-reason').textContent = result.reason;
+     $('handle-next').hidden = !recommendation;
+   } catch (error) {
+-    $('next-status').textContent = 'Recommendation unavailable.';
+-    $('next-error').textContent = error.message;
+-    $('next-error').hidden = false;
++    recommendationUnavailable(error.message);
+   }
+ }
++
++function recommendationUnavailable(message = 'Refresh the inbox to try again.') {
++  recommendation = null;
++  $('next-status').textContent = 'Recommendation unavailable.';
++  $('next-reason').textContent = '';
++  $('next-meta').textContent = '';
++  $('next-error').textContent = message;
++  $('next-error').hidden = false;
++  $('handle-next').hidden = true;
++}
+ $('handle-next').addEventListener('click', () => {
+   if (recommendation && !busy) void update({ ...recommendation, status: 'open' });
+ });
+--- a/public/index.html
++++ b/public/index.html
+@@ -23,6 +23,7 @@
+       <section class="inbox recommendation" aria-labelledby="next-title">
+         <h2 id="next-title">Handle next</h2>
+         <p id="next-status" role="status">Finding the next request…</p>
++        <p id="next-meta" class="meta"></p>
+         <p id="next-reason"></p>
+         <p id="next-error" class="error" role="alert" hidden></p>
+         <button id="handle-next" class="handle" type="button" hidden>Mark handled</button>
+--- a/test/server.test.js
++++ b/test/server.test.js
+@@ -44,3 +44,62 @@
+   const call = await fixture(t, { requests: [] });
+   assert.deepEqual(await (await call('/api/requests')).json(), { requests: [] });
+ });
++
++const next = async call => (await call('/api/next-request')).json();
++const record = (id, urgency, createdAt, status = 'open') => ({ id, guest: 'Test', room: '1', title: id, detail: '', urgency, status, createdAt });
++
++test('next request never recommends a resolved request and breaks exact ties by ascending ID', async t => {
++  const call = await fixture(t);
++  // GD-104 is the oldest urgent request but is resolved; GD-103 and GD-105 are tied on urgency and time.
++  const first = await next(call);
++  assert.equal(first.request.id, 'GD-103');
++  assert.equal(first.request.status, 'open');
++  assert.match(first.reason, /Urgent priority, waiting since 08:30 UTC/);
++});
++
++test('next request walks the queue in urgency, age, ID order and ends with request:null', async t => {
++  const call = await fixture(t);
++  const seen = [];
++  for (let result = await next(call), guard = 0; result.request && guard < 10; result = await next(call), guard++) {
++    seen.push(result.request.id);
++    assert.equal((await call(`/api/requests/${result.request.id}`, { method: 'PATCH', body: '{"status":"resolved"}' })).status, 200);
++  }
++  assert.deepEqual(seen, ['GD-103', 'GD-105', 'GD-102', 'GD-106', 'GD-101']);
++  assert.deepEqual(await next(call), { request: null, reason: 'No open requests remain.' });
++});
++
++test('an empty or fully resolved queue returns request:null with a reason', async t => {
++  for (const requests of [[], [record('GD-1', 'urgent', '2026-11-03T08:00:00Z', 'resolved')]]) {
++    const call = await fixture(t, { requests });
++    const result = await next(call);
++    assert.equal(result.request, null);
++    assert.equal(result.reason, 'No open requests remain.');
++  }
++});
++
++test('ID ties are numeric-aware and parsed times are compared, not strings', async t => {
++  const call = await fixture(t, { requests: [
++    record('GD-100', 'normal', '2026-11-03T08:00:00Z'),
++    record('GD-99', 'normal', '2026-11-03T08:00:00Z'),
++    record('GD-1', 'normal', '2026-11-03T13:00:00+05:30'), // 07:30 UTC, earliest despite the later-looking string
++  ] });
++  assert.equal((await next(call)).request.id, 'GD-1');
++  await call('/api/requests/GD-1', { method: 'PATCH', body: '{"status":"resolved"}' });
++  assert.equal((await next(call)).request.id, 'GD-99');
++});
++
++test('unknown urgency and unreadable dates sort last instead of crashing', async t => {
++  const call = await fixture(t, { requests: [
++    record('GD-1', 'critical', '2026-11-03T07:00:00Z'),
++    record('GD-2', 'low', 'not-a-date'),
++    record('GD-3', 'low', '2026-11-03T09:00:00Z'),
++  ] });
++  const order = [];
++  for (let result = await next(call), guard = 0; result.request && guard < 10; result = await next(call), guard++) {
++    order.push([result.request.id, result.reason]);
++    await call(`/api/requests/${result.request.id}`, { method: 'PATCH', body: '{"status":"resolved"}' });
++  }
++  assert.deepEqual(order.map(([id]) => id), ['GD-3', 'GD-2', 'GD-1']);
++  assert.match(order[1][1], /creation time unknown/);
++  assert.match(order[2][1], /Unrecognised urgency/);
++});

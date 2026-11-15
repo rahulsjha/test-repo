@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A small guest-request inbox for a hospitality team.">
+  <title>Guest desk · A little more care</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Workspace">
+      <a class="brand" href="/" aria-label="Guest desk home"><span class="brand-mark" aria-hidden="true">g.</span>guest desk</a>
+      <p class="sidebar-label">YOUR WORKSPACE</p>
+      <p class="active-nav"><span aria-hidden="true">↳</span> Guest requests <span id="nav-count" class="nav-count">…</span></p>
+      <div class="sidebar-note"><span class="live-dot" aria-hidden="true"></span> A little more care.<p>Good stays are made of small moments handled well.</p></div>
+      <p class="demo-note">FICTIONAL DEMO · NO MESSAGES SENT</p>
+    </aside>
+    <main>
+      <header class="topbar"><span>OPERATIONS / GUEST REQUESTS</span><span>Demo workspace <span class="avatar" aria-hidden="true">GD</span></span></header>
+      <section class="page-heading" aria-labelledby="title"><p class="eyebrow">THE GUEST EXPERIENCE</p><h1 id="title">Small requests.<br><em>Better stays.</em></h1><p>One place for the things your guests need.<br>Pick a request, take care of it, and keep their day moving.</p></section>
+      <section class="inbox recommendation" aria-labelledby="next-title">
+        <h2 id="next-title">Handle next</h2>
+        <p id="next-status" role="status">Finding the next request…</p>
+        <p id="next-meta" class="meta"></p>
+        <p id="next-reason"></p>
+        <p id="next-error" class="error" role="alert" hidden></p>
+        <button id="handle-next" class="handle" type="button" hidden>Mark handled</button>
+      </section>
+      <section class="inbox" aria-labelledby="inbox-title">
+        <div class="inbox-heading"><div><h2 id="inbox-title">Your inbox <span id="open-count" class="count">…</span></h2><p>Oldest requests first</p></div><button id="refresh" class="quiet" type="button">Refresh inbox <span aria-hidden="true">↻</span></button></div>
+        <div class="filters" role="group" aria-label="Filter requests"><button type="button" data-filter="open" aria-pressed="true">Open requests</button><button type="button" data-filter="all" aria-pressed="false">All requests</button><button type="button" data-filter="resolved" aria-pressed="false">Handled</button></div>
+        <p id="status" class="status" role="status">Opening your inbox…</p>
+        <p id="error" class="error" role="alert" hidden></p>
+        <div id="requests" aria-label="Guest requests"></div>
+        <p id="empty" class="empty" hidden>All caught up. Your guests are in good hands.</p>
+      </section>
+      <footer><span>Thoughtful hospitality starts here.</span><span>Guest desk / starter edition</span></footer>
+    </main>
+  </div>
+</body>
+</html>

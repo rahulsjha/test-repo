@@ -1,0 +1,8 @@
+[
+  { "id": "GD-101", "guest": "Samira", "room": "204", "title": "Extra towels for the evening", "detail": "Two extra towels, whenever the team has a moment.", "urgency": "low", "status": "open", "createdAt": "2026-11-03T08:00:00Z" },
+  { "id": "GD-102", "guest": "Alex", "room": "108", "title": "Desk lamp is not working", "detail": "The ceiling light works. I would like to use the desk tonight.", "urgency": "normal", "status": "open", "createdAt": "2026-11-03T08:10:00Z" },
+  { "id": "GD-103", "guest": "Jules", "room": "310", "title": "Locked out of the apartment", "detail": "The door code stopped working and I am waiting outside.", "urgency": "urgent", "status": "open", "createdAt": "2026-11-03T08:30:00Z" },
+  { "id": "GD-104", "guest": "Morgan", "room": "402", "title": "Water leaking under the sink", "detail": "The water has been turned off and maintenance has already attended.", "urgency": "urgent", "status": "resolved", "createdAt": "2026-11-03T07:45:00Z" },
+  { "id": "GD-105", "guest": "Casey", "room": "206", "title": "Help needed at the entrance", "detail": "The entrance key is not opening the door.", "urgency": "urgent", "status": "open", "createdAt": "2026-11-03T08:30:00Z" },
+  { "id": "GD-106", "guest": "Robin", "room": "115", "title": "Check the Wi-Fi connection", "detail": "The network drops during video calls. Mobile data is working for now.", "urgency": "normal", "status": "open", "createdAt": "2026-11-03T08:20:00Z" }
+]
